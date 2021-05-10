@@ -109,14 +109,14 @@
             v-for="t in paginatedTickers"
             :key="t.name"
             @click="select(t)"
-            :class="{ 'border-4': selectedTicker === t }"
+            :class="{ 'border-4': selectedTicker === t, 'bg-red-100': t.error }"
           >
             <div class="px-4 py-5 sm:p-6 text-center">
               <dt class="text-sm font-medium text-gray-500 truncate">
                 {{ t.name }} - USD
               </dt>
               <dd class="mt-1 text-3xl font-semibold text-gray-900">
-                {{ t.price }}
+                {{ formatPrice(t.price) }}
               </dd>
             </div>
             <div class="w-full border-t border-gray-200"></div>
@@ -146,10 +146,14 @@
         <h3 class="text-lg leading-6 font-medium text-gray-900 my-8">
           {{ selectedTicker.name }} - USD
         </h3>
-        <div class="flex items-end border-gray-600 border-b border-l h-64">
+        <div
+          class="flex items-end border-gray-600 border-b border-l h-64"
+          ref="graph"
+        >
           <div
             v-for="(bar, idx) in normalizedGraph"
             class="bg-purple-800 border w-10"
+            ref="bar"
             :style="{ height: `${bar}%` }"
             :key="idx"
           ></div>
@@ -187,19 +191,26 @@
 </template>
 
 <script>
+import { subscribeToTicker, unsubscribeFromTicker } from "./api";
+const ALL_COINS_URL =
+  "https://min-api.cryptocompare.com/data/all/coinlist?summary=true";
+const LS_TICKERS_KEY = "cryptonomicon-list";
 export default {
   name: "App",
   data() {
     return {
       ticker: "",
       tickers: [],
+
       graph: [],
+      maxGraphElements: 1,
+
       selectedTicker: null,
       coins: null,
       error: false,
       autoComplete: [],
       page: 1,
-      filter: "",
+      filter: ""
     };
   },
   async created() {
@@ -208,22 +219,34 @@ export default {
     );
 
     const VALID_KEYS = ["filter", "page"];
-    VALID_KEYS.forEach((key) => {
+    VALID_KEYS.forEach(key => {
       if (key in windowData) {
         this[key] = windowData[key];
       }
     });
 
-    const response = await fetch(
-      "https://min-api.cryptocompare.com/data/all/coinlist?summary=true"
-    );
+    const response = await fetch(ALL_COINS_URL);
     const { Data } = await response.json();
     this.coins = Object.keys(Data);
-    const tickersData = window.localStorage.getItem("cryptonomicon-list");
+    const tickersData = window.localStorage.getItem(LS_TICKERS_KEY);
     if (tickersData) {
       this.tickers = JSON.parse(tickersData);
     }
-    this.tickers.forEach((t) => this.subscribeToUpdates(t.name));
+    this.tickers.forEach(t =>
+      subscribeToTicker(
+        t.name,
+        newPrice => {
+          this.updateTicker(t.name, newPrice);
+        },
+        () => this.setErrorTicker(t.name)
+      )
+    );
+  },
+  mounted() {
+    window.addEventListener("resize", this.calculateMaxGraphElements);
+  },
+  beforeUnmount() {
+    window.removeEventListener("resize", this.calculateMaxGraphElements);
   },
   computed: {
     startIndex() {
@@ -233,7 +256,7 @@ export default {
       return this.page * 6;
     },
     filteredTickers() {
-      return this.tickers.filter((ticker) =>
+      return this.tickers.filter(ticker =>
         ticker.name.toUpperCase().includes(this.filter.toUpperCase())
       );
     },
@@ -250,13 +273,13 @@ export default {
         return this.graph.map(() => 50);
       }
       return this.graph.map(
-        (price) => 5 + ((price - minValue) * 95) / (maxValue - minValue)
+        price => 5 + ((price - minValue) * 95) / (maxValue - minValue)
       );
     },
     pageStateOptions() {
       return {
         filter: this.filter,
-        page: this.page,
+        page: this.page
       };
     },
     autoCompletedList() {
@@ -272,59 +295,88 @@ export default {
         }
       }
       return newAutoComplete;
-    },
+    }
   },
   methods: {
-    subscribeToUpdates(tickerName) {
-      setInterval(async () => {
-        const f = await fetch(
-          `https://min-api.cryptocompare.com/data/price?fsym=${tickerName}&tsyms=USD&api_key=eeb255d1edccb58e6ffd64c87d5b26e54c6346ef4b6e1cc8faa4c3d053834a0f`
-        );
-        const data = await f.json();
-        this.tickers.find((t) => t.name === tickerName).price =
-          data.USD > 1 ? data.USD.toFixed(2) : data.USD.toPrecision(2);
-
-        if (tickerName === this.selectedTicker?.name) {
-          this.graph.push(data.USD);
-        }
-      }, 3000);
+    updateTicker(tickerName, price) {
+      this.tickers
+        .filter(t => t.name === tickerName)
+        .forEach(t => {
+          if (t === this.selectedTicker) {
+            this.graph.push(price);
+            if (this.graph.length > this.maxGraphElements) {
+              this.graph = this.graph.slice(
+                this.graph.length - this.maxGraphElements
+              );
+            }
+          }
+          t.price = price;
+        });
+    },
+    calculateMaxGraphElements() {
+      if (!this.$refs.graph) {
+        return;
+      }
+      const barWidth = this.$refs.bar ? this.$refs.bar.offsetWidth : 38;
+      this.maxGraphElements = Math.floor(
+        this.$refs.graph.clientWidth / barWidth
+      );
+    },
+    setErrorTicker(tickerName) {
+      this.tickers
+        .filter(t => t.name === tickerName)
+        .forEach(t => (t.error = true));
+    },
+    formatPrice(price) {
+      if (price === "-") {
+        return price;
+      }
+      return price > 1 ? price.toFixed(2) : price.toPrecision(2);
     },
     add() {
       if (!this.ticker) {
         return;
       }
       const currentTicker = { name: this.ticker, price: "-" };
-      if (this.tickers.find((t) => t.name === currentTicker.name)) {
+      if (this.tickers.find(t => t.name === currentTicker.name)) {
         this.error = true;
         return;
       }
       this.tickers = [...this.tickers, currentTicker];
       this.ticker = "";
       this.filter = "";
-      this.subscribeToUpdates(currentTicker.name);
+      subscribeToTicker(
+        currentTicker.name,
+        newPrice => {
+          this.updateTicker(currentTicker.name, newPrice);
+        },
+        () => this.setErrorTicker(currentTicker.name)
+      );
     },
     handleDelete(tickerToRemove) {
-      this.tickers = this.tickers.filter((ticker) => tickerToRemove !== ticker);
+      this.tickers = this.tickers.filter(ticker => tickerToRemove !== ticker);
       if (tickerToRemove === this.selectedTicker) {
         this.selectedTicker = null;
       }
+      unsubscribeFromTicker(tickerToRemove.name);
     },
     select(ticker) {
       this.selectedTicker = ticker;
     },
     handleAutoComplete(name) {
       this.ticker = name;
-      if (!this.tickers.find((t) => t.name === name)) {
+      if (!this.tickers.find(t => t.name === name)) {
         this.add();
         this.error = false;
       } else {
         this.error = true;
       }
-    },
+    }
   },
   watch: {
     selectedTicker() {
       this.graph = [];
+      this.$nextTick().then(this.calculateMaxGraphElements);
     },
     paginatedTickers() {
       if (this.paginatedTickers.length === 0 && this.page > 1) {
@@ -332,10 +384,7 @@ export default {
       }
     },
     tickers() {
-      window.localStorage.setItem(
-        "cryptonomicon-list",
-        JSON.stringify(this.tickers)
-      );
+      window.localStorage.setItem(LS_TICKERS_KEY, JSON.stringify(this.tickers));
     },
     filter() {
       this.page = 1;
@@ -346,7 +395,7 @@ export default {
         document.title,
         `${window.location.pathname}?filter=${value.filter}&page=${value.page}`
       );
-    },
-  },
+    }
+  }
 };
 </script>
